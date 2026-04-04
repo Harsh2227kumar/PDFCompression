@@ -8,14 +8,18 @@ const cors = require('cors');
 const app = express();
 const port = 3001;
 
-// Allow CORS for your Vercel frontend
-app.use(cors());
+// --- VERBOSE LOGGING HELPERS ---
+const log = (tag, msg) => {
+    console.log(`[${new Date().toISOString()}] [INFO] [${tag}] ${msg}`);
+};
+const logErr = (tag, msg, err = '') => {
+    console.error(`[${new Date().toISOString()}] [ERROR] [${tag}] ${msg}`, err);
+};
 
-// Increase body parser limits
+app.use(cors());
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
-// Setup multer: Increased limit to 200MB to comfortably handle 60MB files
 const upload = multer({ 
     dest: 'uploads/', 
     limits: { fileSize: 200 * 1024 * 1024 } 
@@ -25,7 +29,7 @@ function findGhostscriptCommand() {
     const configuredCommand = process.env.GHOSTSCRIPT_PATH || process.env.GS_PATH;
     if (configuredCommand) return configuredCommand;
     if (process.platform === 'win32') return 'gswin64c';
-    return 'gs'; // Default for AWS EC2 Linux
+    return 'gs'; 
 }
 
 function commandExists(command, callback) {
@@ -36,111 +40,121 @@ function commandExists(command, callback) {
 }
 
 app.post('/compress', upload.single('pdf'), (req, res) => {
-    // 1. Extend timeouts to 15 minutes to prevent drops on large files
     req.setTimeout(15 * 60 * 1000); 
     res.setTimeout(15 * 60 * 1000);
 
+    log('API', `--- New Compression Request Started ---`);
+
     if (!req.file) {
+        logErr('API', 'Request rejected. No file was attached to the payload.');
         return res.status(400).send('No file uploaded.');
     }
+
+    const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
+    log('UPLOAD', `Received file: "${req.file.originalname}" | Temp Name: ${req.file.filename} | Size: ${fileSizeMB} MB`);
 
     const inputPath = req.file.path;
     const outputPath = `compressed/compressed-${req.file.filename}.pdf`;
 
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    try {
+        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    } catch (dirErr) {
+        logErr('SYSTEM', 'Failed to create compressed directory', dirErr);
+        return res.status(500).send('Internal server error creating directories.');
+    }
 
     const ghostscriptCommand = findGhostscriptCommand();
 
     commandExists(ghostscriptCommand, (exists) => {
         if (!exists) {
+            logErr('SYSTEM', `Ghostscript command '${ghostscriptCommand}' not found on server.`);
             if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             return res.status(503).send('Ghostscript is not installed on the server.');
         }
 
-        // 2. "BEST COMPRESSION" Ghostscript Parameters
         const commandArgs = [
             '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER',
             '-sDEVICE=pdfwrite',
             '-dCompatibilityLevel=1.4',
-            
-            // Start with a high-quality base (retains document structure)
             '-dPDFSETTINGS=/printer', 
-            
-            // Smart Image Handling (Visually Lossless)
             '-dAutoFilterColorImages=true',
             '-dAutoFilterGrayImages=true',
-            '-dColorImageFilter=/FlateEncode', // Lossless zip compression for images
+            '-dColorImageFilter=/FlateEncode', 
             '-dGrayImageFilter=/FlateEncode',
             '-dDownsampleColorImages=true',
-            '-dColorImageResolution=200',      // 200 DPI cuts size drastically but stays HD visually
+            '-dColorImageResolution=200',      
             '-dDownsampleGrayImages=true',
             '-dGrayImageResolution=200',
             '-dDownsampleMonoImages=true',
             '-dMonoImageResolution=300',
-            
-            // Structural Optimization (The "iLovePDF" secret sauce)
-            '-dDetectDuplicateImages=true',    // Removes duplicate images across pages
+            '-dDetectDuplicateImages=true',    
             '-dCompressFonts=true',
             '-dCompressPages=true',
-            
-            // Formatting & Font Preservation (Zero data loss)
             '-dEmbedAllFonts=true',
-            '-dSubsetFonts=true',              // Keeps formatting, strips unused characters
-            
+            '-dSubsetFonts=true',              
             `-sOutputFile=${outputPath}`,
             inputPath,
         ];
 
-        // 3. Use spawn() to prevent Node.js buffer memory crashes on large files
-        const gsProcess = spawn(ghostscriptCommand, commandArgs);
+        log('GHOSTSCRIPT', `Executing: ${ghostscriptCommand} ${commandArgs.join(' ')}`);
 
+        const gsProcess = spawn(ghostscriptCommand, commandArgs);
         let errorOutput = '';
 
         gsProcess.stderr.on('data', (data) => {
-            errorOutput += data.toString();
+            const stderrMsg = data.toString();
+            errorOutput += stderrMsg;
+            // Log Ghostscript warnings in real-time
+            logErr('GHOSTSCRIPT_STDERR', stderrMsg.trim());
         });
 
         gsProcess.on('close', (code) => {
-            // Clean up original uploaded file to save EC2 disk space
+            log('PROCESS', `Ghostscript exited with code ${code}`);
+
             if (fs.existsSync(inputPath)) {
                 fs.unlinkSync(inputPath);
+                log('CLEANUP', `Deleted original temp file: ${inputPath}`);
             }
 
             if (code !== 0) {
-                console.error(`Ghostscript Error Code ${code}: ${errorOutput}`);
+                logErr('COMPRESSION_FAILED', `Code ${code}. Details: ${errorOutput}`);
                 if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                return res.status(500).send('Error during PDF compression. The file might be corrupted or protected.');
+                return res.status(500).send(`Compression failed. Server logs say: ${errorOutput.substring(0, 200)}...`);
             }
 
             if (!fs.existsSync(outputPath)) {
+                logErr('COMPRESSION_FAILED', `Process finished with code 0, but output file ${outputPath} is missing!`);
                 return res.status(500).send('Compression finished but the file was not created.');
             }
 
-            // Send compressed file back to the browser
+            const outSizeMB = (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(2);
+            log('SUCCESS', `Compression complete. New size: ${outSizeMB} MB. Sending to client...`);
+
             res.download(outputPath, 'compressed.pdf', (downloadError) => {
                 if (downloadError) {
-                    console.error('Download Error:', downloadError);
+                    logErr('NETWORK', 'Failed to send file to client (Browser might have cancelled or timed out)', downloadError);
+                } else {
+                    log('NETWORK', 'File successfully delivered to client.');
                 }
                 
-                // Crucial: Clean up the output file after sending to prevent EC2 storage from filling up
                 if (fs.existsSync(outputPath)) {
                     fs.unlinkSync(outputPath);
+                    log('CLEANUP', `Deleted compressed file: ${outputPath}`);
                 }
             });
         });
 
         gsProcess.on('error', (err) => {
+            logErr('SPAWN_ERROR', 'Failed to start the Ghostscript process', err);
             if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            console.error('Ghostscript spawn error:', err);
             res.status(500).send('Server failed to start the compression tool.');
         });
     });
 });
 
 const server = app.listen(port, () => {
-    console.log(`PDF Compression API listening at http://localhost:${port}`);
+    log('SERVER', `PDF Compression API listening at http://localhost:${port}`);
 });
 
-// 4. Increase global Node.js server timeouts
-server.keepAliveTimeout = 15 * 60 * 1000;      // 15 minutes
-server.headersTimeout = (15 * 60 * 1000) + 1000; // 15 mins + 1 second buffer
+server.keepAliveTimeout = 15 * 60 * 1000;
+server.headersTimeout = (15 * 60 * 1000) + 1000;

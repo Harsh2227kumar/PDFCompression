@@ -1,33 +1,27 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import Navbar from "../components/Navbar";
+import ClientBackground from "../components/ClientBackground";
 
 export const metadata: Metadata = {
-  title: "TenderBlock PDF Compressor",
-  description: "Upload a PDF, compress it through the API, and download the optimized file.",
+  title: "File Compressor",
+  description: "Lossless compression for PDF and Images.",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col">{children}</body>
+    <html lang="en">
+      <body>
+        <div className="app-container">
+          {/* This is now a safe Client Component */}
+          <ClientBackground />
+          
+          <Navbar />
+          <div className="content-wrap">
+            {children}
+          </div>
+        </div>
+      </body>
     </html>
   );
 }

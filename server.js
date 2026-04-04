@@ -1,6 +1,6 @@
 const express = require('express' );
 const multer = require('multer');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
@@ -13,6 +13,29 @@ app.use(cors());
 
 // Set up multer for file storage in a temporary directory
 const upload = multer({ dest: 'uploads/' });
+
+function findGhostscriptCommand() {
+    const configuredCommand = process.env.GHOSTSCRIPT_PATH || process.env.GS_PATH;
+
+    if (configuredCommand) {
+        return configuredCommand;
+    }
+
+    if (process.platform === 'win32') {
+        return 'gswin64c';
+    }
+
+    return 'gs';
+}
+
+function commandExists(command, callback) {
+    const probe = process.platform === 'win32' ? 'where' : 'which';
+    const probeArgs = process.platform === 'win32' ? [command] : [command];
+
+    execFile(probe, probeArgs, (error) => {
+        callback(!error);
+    });
+}
 
 // Define the compression endpoint
 app.post('/compress', upload.single('pdf'), (req, res) => {
@@ -28,24 +51,45 @@ app.post('/compress', upload.single('pdf'), (req, res) => {
 
     // Ghostscript command for compression
     // -dPDFSETTINGS=/ebook provides a good balance of size and quality
-    const command = `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile=${outputPath} ${inputPath}`;
+    const ghostscriptCommand = findGhostscriptCommand();
 
-    exec(command, (error, stdout, stderr) => {
-        // Clean up the original uploaded file
-        fs.unlinkSync(inputPath);
-
-        if (error) {
-            console.error(`Ghostscript Error: ${stderr}`);
-            return res.status(500).send('Error during PDF compression.');
+    commandExists(ghostscriptCommand, (exists) => {
+        if (!exists) {
+            fs.unlinkSync(inputPath);
+            return res.status(503).send('Ghostscript is not installed or not available on PATH. Install Ghostscript or set GHOSTSCRIPT_PATH to the executable path.');
         }
 
-        // Send the compressed file back for download
-        res.download(outputPath, (err) => {
-            if (err) {
-                console.error('Download Error:', err);
+        const commandArgs = [
+            '-sDEVICE=pdfwrite',
+            '-dCompatibilityLevel=1.4',
+            '-dPDFSETTINGS=/ebook',
+            '-dNOPAUSE',
+            '-dQUIET',
+            '-dBATCH',
+            `-sOutputFile=${outputPath}`,
+            inputPath,
+        ];
+
+        execFile(ghostscriptCommand, commandArgs, (error, stdout, stderr) => {
+            // Clean up the original uploaded file
+            fs.unlinkSync(inputPath);
+
+            if (error) {
+                console.error(`Ghostscript Error: ${stderr || error.message}`);
+                return res.status(500).send(stderr || 'Error during PDF compression.');
             }
-            // Clean up the compressed file after sending
-            fs.unlinkSync(outputPath);
+
+            // Send the compressed file back for download
+            res.download(outputPath, (downloadError) => {
+                if (downloadError) {
+                    console.error('Download Error:', downloadError);
+                }
+
+                // Clean up the compressed file after sending
+                if (fs.existsSync(outputPath)) {
+                    fs.unlinkSync(outputPath);
+                }
+            });
         });
     });
 });

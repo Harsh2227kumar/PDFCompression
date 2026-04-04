@@ -1,5 +1,5 @@
 "use client";
-import { ChangeEvent, FormEvent, useState, DragEvent } from "react";
+import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
@@ -9,6 +9,7 @@ export default function CompressPDF() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // File Handlers
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -43,6 +44,10 @@ export default function CompressPDF() {
     }
   };
 
+  const openFilePicker = () => {
+    fileInputRef.current?.click();
+  };
+
   const handleCompress = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedFile) return;
@@ -55,7 +60,7 @@ export default function CompressPDF() {
     formData.append("pdf", selectedFile);
 
     try {
-      const response = await fetch(`${API_URL}/compress`, {
+      const response = await fetch(`${API_URL}/compress-pdf`, {
         method: "POST",
         body: formData,
       });
@@ -114,16 +119,29 @@ export default function CompressPDF() {
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
+            onClick={openFilePicker}
           >
-            <div className="upload-icon" aria-hidden="true" />
+            <div
+              className="upload-icon"
+              aria-label="Select PDF file"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openFilePicker();
+                }
+              }}
+            />
             <p className="upload-prompt">
               {isDragging ? "Drop your PDF here" : "Drag & drop your PDF here, or click to browse"}
             </p>
             <input 
+              ref={fileInputRef}
               type="file" 
               accept="application/pdf,.pdf" 
               onChange={handleFileChange} 
-              className="file-input"
+              className="file-input file-input-hidden"
             />
           </div>
 

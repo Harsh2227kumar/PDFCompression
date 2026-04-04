@@ -39,7 +39,7 @@ function commandExists(command, callback) {
     });
 }
 
-app.post('/compress', upload.single('pdf'), (req, res) => {
+app.post('/compress-pdf', upload.single('pdf'), (req, res) => {
     req.setTimeout(15 * 60 * 1000); 
     res.setTimeout(15 * 60 * 1000);
 
@@ -157,52 +157,72 @@ app.post('/compress', upload.single('pdf'), (req, res) => {
 const sharp = require('sharp');
 
 // --- NEW ENDPOINT: IMAGE COMPRESSION ---
+// --- NEW ENDPOINT: IMAGE COMPRESSION WITH VERBOSE LOGGING ---
 app.post('/compress-image', upload.single('image'), async (req, res) => {
     log('API', `--- New Image Compression Request Started ---`);
 
+    // 1. Check if file exists in request
     if (!req.file) {
-        logErr('API', 'No image uploaded.');
+        logErr('API', 'Image compression failed: No file found in req.file. Ensure frontend field name is "image".');
         return res.status(400).send('No image uploaded.');
     }
 
     const inputPath = req.file.path;
-    const originalExt = path.extname(req.file.originalname).toLowerCase();
+    const originalName = req.file.originalname;
+    const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
     
-    // Fallback to .jpg if extension is weird, otherwise keep original
-    const ext = ['.png', '.webp', '.jpg', '.jpeg'].includes(originalExt) ? originalExt : '.jpg';
+    log('UPLOAD', `File Received: "${originalName}" (${fileSizeMB} MB)`);
+
+    // 2. Determine extension and output path
+    const ext = path.extname(originalName).toLowerCase() || '.jpg';
     const outputPath = `compressed/compressed-${req.file.filename}${ext}`;
 
     try {
+        log('SYSTEM', `Creating directory if missing: compressed/`);
         fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
-        // Visually Lossless Configuration using Sharp
+        log('SHARP', `Starting Sharp processing for extension: ${ext}`);
         let transform = sharp(inputPath);
 
+        // Apply lossless/near-lossless logic based on format
         if (ext === '.png') {
-            // PNG: Maximum compression effort, lossless
-            transform = transform.png({ compressionLevel: 9, adaptiveFiltering: true });
+            log('SHARP', 'Applying PNG Lossless (Compression Level 9)');
+            transform = transform.png({ compressionLevel: 9, palette: true });
         } else if (ext === '.webp') {
-            // WebP: Near-lossless config
+            log('SHARP', 'Applying WebP Near-Lossless (Quality 85)');
             transform = transform.webp({ quality: 85, nearLossless: true });
         } else {
-            // JPEG: MozJPEG engine for massive size reduction without visual quality drop
+            log('SHARP', 'Applying JPEG MozJPEG Optimization (Quality 82)');
             transform = transform.jpeg({ quality: 82, mozjpeg: true });
         }
 
+        // Execute the compression
         await transform.toFile(outputPath);
         
         const outSizeMB = (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(2);
-        log('SUCCESS', `Image compressed. New size: ${outSizeMB} MB. Sending...`);
+        log('SUCCESS', `Image compressed successfully: ${fileSizeMB}MB -> ${outSizeMB}MB`);
 
-        res.download(outputPath, `compressed-${req.file.originalname}`, (downloadError) => {
+        // 3. Send and Cleanup
+        res.download(outputPath, `compressed-${originalName}`, (downloadError) => {
+            if (downloadError) {
+                logErr('NETWORK', `Download failed for ${originalName}`, downloadError);
+            } else {
+                log('NETWORK', `File delivered to client: ${originalName}`);
+            }
+
+            // Always cleanup temp and compressed files
             if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+            log('CLEANUP', 'Temporary files removed.');
         });
 
     } catch (error) {
-        logErr('IMAGE_ERROR', 'Sharp failed to process image', error);
+        logErr('SHARP_FATAL', `Critical error processing image: ${originalName}`, error);
+        
+        // Cleanup on failure
         if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-        res.status(500).send('Server failed to compress the image.');
+        
+        res.status(500).send(`Internal Server Error: ${error.message}`);
     }
 });
 

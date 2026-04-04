@@ -333,10 +333,11 @@ html, body {
   height: 4.5rem;
   position: relative;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  background: rgba(255, 255, 255, 0.06);
-  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.035);
+  pointer-events: auto;
   margin-bottom: 0.35rem;
+  cursor: pointer;
 }
 
 .upload-icon::before,
@@ -346,7 +347,7 @@ html, body {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.58);
   border-radius: 999px;
 }
 
@@ -363,6 +364,10 @@ html, body {
 .file-input {
   width: 100%;
   color: #a1a1aa;
+}
+
+.file-input-hidden {
+  display: none;
 }
 
 .file-input::file-selector-button {

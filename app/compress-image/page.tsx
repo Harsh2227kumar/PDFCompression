@@ -1,5 +1,5 @@
 "use client";
-import { ChangeEvent, FormEvent, useState, DragEvent } from "react";
+import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
@@ -9,6 +9,7 @@ export default function CompressImage() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -29,7 +30,7 @@ export default function CompressImage() {
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     const file = e.dataTransfer.files?.[0];
     if (file && file.type.startsWith("image/")) {
       setSelectedFile(file);
@@ -41,6 +42,10 @@ export default function CompressImage() {
     }
   };
 
+  const openFilePicker = () => {
+    fileInputRef.current?.click();
+  };
+
   const handleCompress = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedFile) return;
@@ -50,12 +55,16 @@ export default function CompressImage() {
     setMessage("Processing image...");
 
     const formData = new FormData();
-    formData.append("image", selectedFile); 
+    formData.append("image", selectedFile);
 
     try {
-      const response = await fetch(`${API_URL}/compress-image`, {
+      // Remove trailing slash if it exists, then add the route
+      const cleanBaseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+
+      const response = await fetch(`${cleanBaseUrl}/compress-image`, {
         method: "POST",
         body: formData,
+
       });
 
       if (!response.ok) throw new Error(await response.text());
@@ -87,7 +96,7 @@ export default function CompressImage() {
         <p className="page-description">
           Reduce JPG, PNG, and WebP payloads for faster loading times and better SEO. Our backend applies mathematically optimal reduction to keep images visually identical.
         </p>
-        
+
         <ul className="features-list">
           <li>
             <span className="feature-icon">⚙️</span>
@@ -107,21 +116,34 @@ export default function CompressImage() {
       {/* Right Column: Upload Panel */}
       <div className="glass-panel">
         <form onSubmit={handleCompress}>
-          <div 
+          <div
             className={`file-input-wrap ${isDragging ? 'drag-active' : ''}`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
+            onClick={openFilePicker}
           >
-            <div className="upload-icon" aria-hidden="true" />
+            <div
+              className="upload-icon"
+              aria-label="Select image file"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openFilePicker();
+                }
+              }}
+            />
             <p className="upload-prompt">
               {isDragging ? "Drop your Image here" : "Drag & drop your Image here, or click to browse"}
             </p>
-            <input 
-              type="file" 
-              accept="image/jpeg, image/png, image/webp, .jpg" 
-              onChange={handleFileChange} 
-              className="file-input"
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg, image/png, image/webp, .jpg"
+              onChange={handleFileChange}
+              className="file-input file-input-hidden"
             />
           </div>
 

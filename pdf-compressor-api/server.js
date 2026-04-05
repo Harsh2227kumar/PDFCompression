@@ -4,9 +4,20 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
+const { Queue, Worker, QueueEvents } = require('bullmq');
+const Redis = require('ioredis');
+const sharp = require('sharp');
 
 const app = express();
 const port = 3001;
+
+// --- REDIS CONNECTION ---
+const redisConnection = new Redis({
+    maxRetriesPerRequest: null // Required for BullMQ
+});
+
+// --- BULLMQ QUEUE SETUP ---
+const compressionQueue = new Queue('compression-queue', { connection: redisConnection });
 
 // --- VERBOSE LOGGING HELPERS ---
 const log = (tag, msg) => {
@@ -20,11 +31,19 @@ app.use(cors());
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
+// Ensure directories exist
+const uploadDir = 'uploads/';
+const compressedDir = 'compressed/';
+[uploadDir, compressedDir].forEach(dir => {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
 const upload = multer({ 
-    dest: 'uploads/', 
+    dest: uploadDir, 
     limits: { fileSize: 200 * 1024 * 1024 } 
 });
 
+// --- UTILS ---
 function findGhostscriptCommand() {
     const configuredCommand = process.env.GHOSTSCRIPT_PATH || process.env.GS_PATH;
     if (configuredCommand) return configuredCommand;
@@ -39,196 +58,136 @@ function commandExists(command, callback) {
     });
 }
 
-app.post('/compress-pdf', upload.single('pdf'), (req, res) => {
-    req.setTimeout(15 * 60 * 1000); 
-    res.setTimeout(15 * 60 * 1000);
+// --- API ROUTES ---
 
-    log('API', `--- New Compression Request Started ---`);
-
-    if (!req.file) {
-        logErr('API', 'Request rejected. No file was attached to the payload.');
-        return res.status(400).send('No file uploaded.');
-    }
-
-    const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
-    log('UPLOAD', `Received file: "${req.file.originalname}" | Temp Name: ${req.file.filename} | Size: ${fileSizeMB} MB`);
-
-    const inputPath = req.file.path;
-    const outputPath = `compressed/compressed-${req.file.filename}.pdf`;
+// 1. PDF Queue Route
+app.post('/compress-pdf', upload.single('pdf'), async (req, res) => {
+    log('API', 'New PDF Compression Request Received');
+    if (!req.file) return res.status(400).send('No file uploaded.');
 
     try {
-        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    } catch (dirErr) {
-        logErr('SYSTEM', 'Failed to create compressed directory', dirErr);
-        return res.status(500).send('Internal server error creating directories.');
+        const job = await compressionQueue.add('pdf-compression', {
+            type: 'pdf',
+            inputPath: req.file.path,
+            originalName: req.file.originalname,
+            filename: req.file.filename
+        });
+        
+        log('QUEUE', `Job ${job.id} added for ${req.file.originalname}`);
+        res.json({ jobId: job.id });
+    } catch (err) {
+        logErr('QUEUE_ERROR', 'Failed to add PDF job', err);
+        res.status(500).send('Failed to queue compression task.');
+    }
+});
+
+// 2. Image Queue Route
+app.post('/compress-image', upload.single('image'), async (req, res) => {
+    log('API', 'New Image Compression Request Received');
+    if (!req.file) return res.status(400).send('No file uploaded.');
+
+    try {
+        const job = await compressionQueue.add('image-compression', {
+            type: 'image',
+            inputPath: req.file.path,
+            originalName: req.file.originalname,
+            filename: req.file.filename
+        });
+
+        log('QUEUE', `Job ${job.id} added for ${req.file.originalname}`);
+        res.json({ jobId: job.id });
+    } catch (err) {
+        logErr('QUEUE_ERROR', 'Failed to add Image job', err);
+        res.status(500).send('Failed to queue image task.');
+    }
+});
+
+// 3. Status Polling Route
+app.get('/status/:jobId', async (req, res) => {
+    const { jobId } = req.params;
+    const job = await compressionQueue.getJob(jobId);
+
+    if (!job) {
+        return res.status(404).json({ state: 'not_found', message: 'Job not found.' });
     }
 
-    const ghostscriptCommand = findGhostscriptCommand();
+    const state = await job.getState(); // waiting, active, completed, failed
+    const result = job.returnvalue;
 
-    commandExists(ghostscriptCommand, (exists) => {
-        if (!exists) {
-            logErr('SYSTEM', `Ghostscript command '${ghostscriptCommand}' not found on server.`);
-            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            return res.status(503).send('Ghostscript is not installed on the server.');
-        }
-
-        const commandArgs = [
-            '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER',
-            '-sDEVICE=pdfwrite',
-            '-dCompatibilityLevel=1.4',
-            '-dPDFSETTINGS=/printer', 
-            '-dAutoFilterColorImages=true',
-            '-dAutoFilterGrayImages=true',
-            '-dColorImageFilter=/FlateEncode', 
-            '-dGrayImageFilter=/FlateEncode',
-            '-dDownsampleColorImages=true',
-            '-dColorImageResolution=200',      
-            '-dDownsampleGrayImages=true',
-            '-dGrayImageResolution=200',
-            '-dDownsampleMonoImages=true',
-            '-dMonoImageResolution=300',
-            '-dDetectDuplicateImages=true',    
-            '-dCompressFonts=true',
-            '-dCompressPages=true',
-            '-dEmbedAllFonts=true',
-            '-dSubsetFonts=true',              
-            `-sOutputFile=${outputPath}`,
-            inputPath,
-        ];
-
-        log('GHOSTSCRIPT', `Executing: ${ghostscriptCommand} ${commandArgs.join(' ')}`);
-
-        const gsProcess = spawn(ghostscriptCommand, commandArgs);
-        let errorOutput = '';
-
-        gsProcess.stderr.on('data', (data) => {
-            const stderrMsg = data.toString();
-            errorOutput += stderrMsg;
-            // Log Ghostscript warnings in real-time
-            logErr('GHOSTSCRIPT_STDERR', stderrMsg.trim());
-        });
-
-        gsProcess.on('close', (code) => {
-            log('PROCESS', `Ghostscript exited with code ${code}`);
-
-            if (fs.existsSync(inputPath)) {
-                fs.unlinkSync(inputPath);
-                log('CLEANUP', `Deleted original temp file: ${inputPath}`);
-            }
-
-            if (code !== 0) {
-                logErr('COMPRESSION_FAILED', `Code ${code}. Details: ${errorOutput}`);
-                if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                return res.status(500).send(`Compression failed. Server logs say: ${errorOutput.substring(0, 200)}...`);
-            }
-
-            if (!fs.existsSync(outputPath)) {
-                logErr('COMPRESSION_FAILED', `Process finished with code 0, but output file ${outputPath} is missing!`);
-                return res.status(500).send('Compression finished but the file was not created.');
-            }
-
-            const outSizeMB = (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(2);
-            log('SUCCESS', `Compression complete. New size: ${outSizeMB} MB. Sending to client...`);
-
-            res.download(outputPath, 'compressed.pdf', (downloadError) => {
-                if (downloadError) {
-                    logErr('NETWORK', 'Failed to send file to client (Browser might have cancelled or timed out)', downloadError);
-                } else {
-                    log('NETWORK', 'File successfully delivered to client.');
-                }
-                
-                if (fs.existsSync(outputPath)) {
-                    fs.unlinkSync(outputPath);
-                    log('CLEANUP', `Deleted compressed file: ${outputPath}`);
-                }
-            });
-        });
-
-        gsProcess.on('error', (err) => {
-            logErr('SPAWN_ERROR', 'Failed to start the Ghostscript process', err);
-            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            res.status(500).send('Server failed to start the compression tool.');
-        });
+    res.json({
+        state,
+        progress: job.progress,
+        downloadUrl: result ? `/download/${result.compressedFilename}` : null,
+        error: job.failedReason
     });
 });
 
-
-
-const sharp = require('sharp');
-
-// --- NEW ENDPOINT: IMAGE COMPRESSION ---
-// --- NEW ENDPOINT: IMAGE COMPRESSION WITH VERBOSE LOGGING ---
-app.post('/compress-image', upload.single('image'), async (req, res) => {
-    log('API', `--- New Image Compression Request Started ---`);
-
-    // 1. Check if file exists in request
-    if (!req.file) {
-        logErr('API', 'Image compression failed: No file found in req.file. Ensure frontend field name is "image".');
-        return res.status(400).send('No image uploaded.');
-    }
-
-    const inputPath = req.file.path;
-    const originalName = req.file.originalname;
-    const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
+// 4. Final Download Route
+app.get('/download/:filename', (req, res) => {
+    const filePath = path.join(__dirname, 'compressed', req.params.filename);
     
-    log('UPLOAD', `File Received: "${originalName}" (${fileSizeMB} MB)`);
-
-    // 2. Determine extension and output path
-    const ext = path.extname(originalName).toLowerCase() || '.jpg';
-    const outputPath = `compressed/compressed-${req.file.filename}${ext}`;
-
-    try {
-        log('SYSTEM', `Creating directory if missing: compressed/`);
-        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-        log('SHARP', `Starting Sharp processing for extension: ${ext}`);
-        let transform = sharp(inputPath);
-
-        // Apply lossless/near-lossless logic based on format
-        if (ext === '.png') {
-            log('SHARP', 'Applying PNG Lossless (Compression Level 9)');
-            transform = transform.png({ compressionLevel: 9, palette: true });
-        } else if (ext === '.webp') {
-            log('SHARP', 'Applying WebP Near-Lossless (Quality 85)');
-            transform = transform.webp({ quality: 85, nearLossless: true });
-        } else {
-            log('SHARP', 'Applying JPEG MozJPEG Optimization (Quality 82)');
-            transform = transform.jpeg({ quality: 82, mozjpeg: true });
-        }
-
-        // Execute the compression
-        await transform.toFile(outputPath);
-        
-        const outSizeMB = (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(2);
-        log('SUCCESS', `Image compressed successfully: ${fileSizeMB}MB -> ${outSizeMB}MB`);
-
-        // 3. Send and Cleanup
-        res.download(outputPath, `compressed-${originalName}`, (downloadError) => {
-            if (downloadError) {
-                logErr('NETWORK', `Download failed for ${originalName}`, downloadError);
-            } else {
-                log('NETWORK', `File delivered to client: ${originalName}`);
+    if (fs.existsSync(filePath)) {
+        res.download(filePath, (err) => {
+            if (!err) {
+                // Optional: Delete file after download to keep server clean
+                // fs.unlinkSync(filePath); 
             }
-
-            // Always cleanup temp and compressed files
-            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-            log('CLEANUP', 'Temporary files removed.');
         });
-
-    } catch (error) {
-        logErr('SHARP_FATAL', `Critical error processing image: ${originalName}`, error);
-        
-        // Cleanup on failure
-        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-        
-        res.status(500).send(`Internal Server Error: ${error.message}`);
+    } else {
+        res.status(404).send('File expired or not found.');
     }
 });
 
+// --- THE BACKGROUND WORKER ---
+// This processes one job at a time (concurrency: 1)
+const worker = new Worker('compression-queue', async (job) => {
+    const { type, inputPath, originalName, filename } = job.data;
+    log('WORKER', `Starting Job ${job.id} (${type}): ${originalName}`);
+
+    if (type === 'pdf') {
+        return new Promise((resolve, reject) => {
+            const outputPath = `compressed/compressed-${filename}.pdf`;
+            const gsCmd = findGhostscriptCommand();
+
+            const args = [
+                '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=pdfwrite',
+                '-dCompatibilityLevel=1.4', '-dPDFSETTINGS=/printer',
+                `-sOutputFile=${outputPath}`, inputPath
+            ];
+
+            const gsProcess = spawn(gsCmd, args);
+            gsProcess.on('close', (code) => {
+                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                if (code === 0) {
+                    resolve({ compressedFilename: `compressed-${filename}.pdf` });
+                } else {
+                    reject(new Error(`Ghostscript exited with code ${code}`));
+                }
+            });
+        });
+    } else {
+        const ext = path.extname(originalName).toLowerCase() || '.jpg';
+        const outputPath = `compressed/compressed-${filename}${ext}`;
+        
+        let transform = sharp(inputPath);
+        if (ext === '.png') transform = transform.png({ compressionLevel: 9, palette: true });
+        else if (ext === '.webp') transform = transform.webp({ quality: 85, nearLossless: true });
+        else transform = transform.jpeg({ quality: 82, mozjpeg: true });
+
+        await transform.toFile(outputPath);
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        return { compressedFilename: `compressed-${filename}${ext}` };
+    }
+}, { 
+    connection: redisConnection,
+    concurrency: 1 // Only process 1 file at a time to prevent CPU overload
+});
+
+worker.on('completed', (job) => log('WORKER', `Job ${job.id} completed successfully.`));
+worker.on('failed', (job, err) => logErr('WORKER', `Job ${job.id} failed`, err));
 
 const server = app.listen(port, () => {
-    log('SERVER', `PDF Compression API listening at http://localhost:${port}`);
+    log('SERVER', `Queue-based API listening at http://localhost:${port}`);
 });
 
 server.keepAliveTimeout = 15 * 60 * 1000;

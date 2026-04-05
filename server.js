@@ -187,12 +187,21 @@ const worker = new Worker(
   "compression-queue",
   async (job) => {
     const { type, inputPath, originalName, filename } = job.data;
-    const outputFilename = `compressed-${filename}${type === "pdf" ? ".pdf" : path.extname(originalName)}`;
+    const outputFilename = `compressed-${filename}${
+      type === "pdf" ? ".pdf" : path.extname(originalName)
+    }`;
     const outputPath = path.join(compressedDir, outputFilename);
 
     try {
+      // 1. Initial Step: File Received (10%)
+      await job.updateProgress(10);
+      log('WORKER', `Processing Job ${job.id}: ${originalName}`);
+
       if (type === "pdf") {
-        return new Promise((resolve, reject) => {
+        return new Promise(async (resolve, reject) => {
+          // 2. Ghostscript Starting (30%)
+          await job.updateProgress(30);
+
           const gsProcess = spawn("gs", [
             "-q",
             "-dNOPAUSE",
@@ -203,18 +212,34 @@ const worker = new Worker(
             `-sOutputFile=${outputPath}`,
             inputPath,
           ]);
-          gsProcess.on("close", (code) => {
+
+          gsProcess.on("close", async (code) => {
             if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-            code === 0
-              ? resolve({ compressedFilename: outputFilename })
-              : reject(new Error(`GS code ${code}`));
+            
+            if (code === 0) {
+              // 3. Success (100%)
+              await job.updateProgress(100);
+              resolve({ compressedFilename: outputFilename });
+            } else {
+              reject(new Error(`GS code ${code}`));
+            }
           });
+
+          // Optional: If Ghostscript takes a long time, we could 
+          // simulate a jump to 70% after a few seconds if the process is still alive
         });
       } else {
+        // 2. Image Processing Starting (40%)
+        await job.updateProgress(40);
+
         await sharp(inputPath)
           .jpeg({ quality: 80, mozjpeg: true })
           .toFile(outputPath);
+
         if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+
+        // 3. Success (100%)
+        await job.updateProgress(100);
         return { compressedFilename: outputFilename };
       }
     } catch (workerErr) {
@@ -224,10 +249,10 @@ const worker = new Worker(
   },
   {
     connection: redisConnection,
-    concurrency: 1, // <--- This is the key for your 1GB RAM
-    lockDuration: 60000, // 60 seconds lock to prevent double-processing
-    maxStalledCount: 1, // If the process hangs, don't keep trying to re-run it immediately
-  },
+    concurrency: 1, // <--- Crucial for your 1GB RAM
+    lockDuration: 60000, 
+    maxStalledCount: 1, 
+  }
 );
 
 worker.on("failed", (job, err) =>

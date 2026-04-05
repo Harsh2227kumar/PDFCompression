@@ -12,10 +12,10 @@ export default function CompressPDF() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  
+
   // State for the "The Win" comparison stats
   const [stats, setStats] = useState<{ original: string, compressed: string, saving: string } | null>(null);
-  
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Helper to format bytes into readable MB
@@ -44,6 +44,15 @@ export default function CompressPDF() {
   const handleCompress = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedFile) return;
+
+    // --- NEW: SIZE GUARD ---
+    // If it's over 15MB, don't even try to upload to avoid the Router Error
+    const MAX_LIMIT = 15 * 1024 * 1024;
+    if (selectedFile.size > MAX_LIMIT) {
+      setIsError(true);
+      setMessage(`File too large (${formatSize(selectedFile.size)}). Maximum limit is 15MB.`);
+      return;
+    }
 
     setIsCompressing(true);
     setIsError(false);
@@ -85,16 +94,16 @@ export default function CompressPDF() {
             setProgress(100);
 
             // FIX UI GLITCH: Clear loading state and messages immediately
-            setMessage(""); 
+            setMessage("");
             setIsCompressing(false);
 
             const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
-            
+
             // Fetch headers to calculate "The Win" accurately
             const fileCheck = await fetch(`${baseUrl}${data.downloadUrl}`);
             const compSize = parseInt(fileCheck.headers.get("content-length") || "0");
             const saving = (((selectedFile.size - compSize) / selectedFile.size) * 100).toFixed(0);
-            
+
             // Set Comparison Stats
             setStats({
               original: formatSize(selectedFile.size),
@@ -175,7 +184,6 @@ export default function CompressPDF() {
             onClick={() => fileInputRef.current?.click()}
             style={{ cursor: 'pointer' }}
           >
-            <div className="upload-icon">📄</div>
             <p className="upload-prompt">
               {selectedFile ? `Selected: ${selectedFile.name}` : isDragging ? "Drop your PDF here" : "Drag & drop your PDF here, or click to browse"}
             </p>
@@ -197,8 +205,8 @@ export default function CompressPDF() {
                 <span className="progress-percent">{progress}%</span>
               </div>
               <div className="progress-track">
-                <div 
-                  className="progress-fill" 
+                <div
+                  className="progress-fill"
                   style={{ width: `${progress}%` }}
                 ></div>
               </div>
@@ -209,8 +217,8 @@ export default function CompressPDF() {
           {stats && (
             <div className="stats-win">
               <div className="stats-row">
-                <span>{stats.original}</span> 
-                <span>→</span> 
+                <span>{stats.original}</span>
+                <span>→</span>
                 <span><strong>{stats.compressed}</strong></span>
               </div>
               <div className="stats-saving">{stats.saving}% Smaller! ✨</div>

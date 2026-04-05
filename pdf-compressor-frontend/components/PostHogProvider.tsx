@@ -4,11 +4,15 @@ import { PostHogProvider } from "posthog-js/react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 
-if (typeof window !== "undefined") {
-  posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {
-    api_host: process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com",
+// Check if the key exists before initializing
+const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_KEY;
+const posthogHost = process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com";
+
+if (typeof window !== "undefined" && posthogKey) {
+  posthog.init(posthogKey, {
+    api_host: posthogHost,
     person_profiles: "identified_only",
-    capture_pageview: false, // We capture manually below to handle Next.js route changes
+    capture_pageview: false, 
   });
 }
 
@@ -17,9 +21,10 @@ export function PHProvider({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams();
 
   useEffect(() => {
-    if (pathname && posthog) {
+    // Only capture if posthog is properly initialized with a key
+    if (pathname && posthogKey && typeof window !== "undefined") {
       let url = window.origin + pathname;
-      if (searchParams.toString()) {
+      if (searchParams?.toString()) {
         url = url + "?" + searchParams.toString();
       }
       posthog.capture("$pageview", {
@@ -27,6 +32,11 @@ export function PHProvider({ children }: { children: React.ReactNode }) {
       });
     }
   }, [pathname, searchParams]);
+
+  // If no key is found, just return children so the app doesn't crash
+  if (!posthogKey) {
+    return <>{children}</>;
+  }
 
   return <PostHogProvider client={posthog}>{children}</PostHogProvider>;
 }

@@ -90,7 +90,9 @@ export default function CompressImage() {
           } else if (data.state === "completed") {
             clearInterval(pollInterval);
             setProgress(100);
-
+            // 1. CLEAR THE PREVIOUS "PROCESSING" MESSAGES
+            setMessage("");
+            setIsCompressing(false);
             // Safely track event
             if (typeof window !== 'undefined' && posthog) {
               posthog.capture("compression_success", {
@@ -109,11 +111,8 @@ export default function CompressImage() {
             anchor.download = `optimized-${selectedFile?.name || 'file'}`;
             document.body.appendChild(anchor);
             anchor.click();
+            anchor.remove();
 
-            setTimeout(() => {
-              anchor.remove();
-              setIsCompressing(false);
-            }, 1000);
 
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
@@ -175,8 +174,8 @@ export default function CompressImage() {
               {selectedFile
                 ? `Selected: ${selectedFile.name}`
                 : isDragging
-                ? "Drop your Image here"
-                : "Drag & drop your Image here, or click to browse"}
+                  ? "Drop your Image here"
+                  : "Drag & drop your Image here, or click to browse"}
             </p>
             <input
               ref={fileInputRef}
@@ -196,8 +195,8 @@ export default function CompressImage() {
                 <span className="progress-percent">{progress}%</span>
               </div>
               <div className="progress-track">
-                <div 
-                  className="progress-fill" 
+                <div
+                  className="progress-fill"
                   style={{ width: `${progress}%` }}
                 ></div>
               </div>
@@ -212,8 +211,8 @@ export default function CompressImage() {
             {isCompressing
               ? "Optimizing..."
               : selectedFile
-              ? `Optimize ${selectedFile.name}`
-              : "Upload & Compress"}
+                ? `Optimize ${selectedFile.name}`
+                : "Upload & Compress"}
           </button>
 
           {!isCompressing && message && (

@@ -33,7 +33,7 @@ export default function CompressPDF() {
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     const file = e.dataTransfer.files?.[0];
     if (file && file.type === "application/pdf") {
       setSelectedFile(file);
@@ -79,24 +79,49 @@ export default function CompressPDF() {
           if (!statusRes.ok) return;
 
           const data = await statusRes.json();
-          
+
           if (data.state === "active") {
             setMessage("Processing... Our engine is shrinking your PDF.");
           } else if (data.state === "completed") {
+            // 1. Stop polling immediately
             clearInterval(pollInterval);
+
+            // 2. Track success in PostHog (with safety checks)
+            if (typeof window !== 'undefined' && posthog) {
+              posthog.capture("compression_success", {
+                file_type: "pdf",
+                original_name: selectedFile?.name,
+                file_size: selectedFile?.size
+              });
+            }
+
             setMessage("Compression complete! Starting download...");
             setIsCompressing(false);
 
-            // 3. TRIGGER DOWNLOAD
+            // 3. Trigger Download
             const anchor = document.createElement("a");
-            anchor.href = `${API_URL}${data.downloadUrl}`;
-            anchor.download = `compressed-${selectedFile.name}`;
+
+            // Clean URL to prevent double slashes (e.g. http://ip//download/...)
+            const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+
+            anchor.href = `${baseUrl}${data.downloadUrl}`;
+            anchor.download = `compressed-${selectedFile?.name || 'document.pdf'}`;
+
+            // Add to body, click, and cleanup
             document.body.appendChild(anchor);
             anchor.click();
-            anchor.remove();
+
+            setTimeout(() => {
+              anchor.remove();
+            }, 100);
+
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
-            throw new Error(data.error || "Queue processing failed.");
+            // Detailed error message for the user
+            const errorMsg = data.error || "The PDF engine encountered an error with this specific file.";
+            setIsError(true);
+            setMessage(errorMsg);
+            setIsCompressing(false);
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
@@ -120,7 +145,7 @@ export default function CompressPDF() {
         <p className="page-description">
           Reduce massive PDF payloads in seconds. Our Ghostscript-powered engine ensures your documents shrink while maintaining pixel-perfect quality.
         </p>
-        
+
         <ul className="features-list">
           <li><span className="feature-icon">✨</span> Lossless Formatting & Fonts preserved.</li>
           <li><span className="feature-icon">🔒</span> Managed via Job Queue for reliability.</li>
@@ -130,7 +155,7 @@ export default function CompressPDF() {
 
       <div className="glass-panel">
         <form onSubmit={handleCompress}>
-          <div 
+          <div
             className={`file-input-wrap ${isDragging ? 'drag-active' : ''}`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -142,11 +167,11 @@ export default function CompressPDF() {
             <p className="upload-prompt">
               {selectedFile ? `Selected: ${selectedFile.name}` : isDragging ? "Drop your PDF here" : "Drag & drop your PDF here, or click to browse"}
             </p>
-            <input 
+            <input
               ref={fileInputRef}
-              type="file" 
-              accept="application/pdf,.pdf" 
-              onChange={handleFileChange} 
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={handleFileChange}
               className="file-input"
               style={{ display: 'none' }}
             />

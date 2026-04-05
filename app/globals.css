@@ -415,3 +415,43 @@ html, body {
   transition: width 0.4s ease-out;
   box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
 }
+
+/* Trust & Success Elements */
+.trust-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 20px 0;
+}
+
+.trust-badge p {
+  font-size: 0.8rem;
+  color: #a1a1aa;
+  margin: 0;
+}
+
+.stats-win {
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px dashed rgba(99, 102, 241, 0.3);
+  border-radius: 12px;
+  padding: 15px;
+  margin: 20px 0;
+  text-align: center;
+  animation: slideUp 0.4s ease-out;
+}
+
+.stats-saving {
+  margin-top: 5px;
+  font-weight: 700;
+  color: #818cf8;
+  font-size: 1.1rem;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}

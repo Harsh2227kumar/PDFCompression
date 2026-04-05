@@ -2,49 +2,42 @@
 import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
 import posthog from "posthog-js";
 
+// Ensure this matches your AWS URL exactly
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export default function CompressPDF() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
-  const [progress, setProgress] = useState(0); // NEW: Progress state
+  const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  // NEW: State for Comparison Stats
+  const [stats, setStats] = useState<{ original: string, compressed: string, saving: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setSelectedFile(event.target.files?.[0] ?? null);
-    setMessage("");
-    setIsError(false);
-    setProgress(0);
-  };
+  // Helper to format bytes
+  const formatSize = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2) + " MB";
 
-  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement> | DragEvent<HTMLDivElement>) => {
+    let file: File | null = null;
+    if ("files" in e.target && e.target.files) {
+      file = e.target.files[0];
+    } else if ("dataTransfer" in e) {
+      file = e.dataTransfer.files[0];
+    }
 
-  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
     if (file && file.type === "application/pdf") {
       setSelectedFile(file);
       setMessage("");
       setIsError(false);
-    } else {
+      setProgress(0);
+      setStats(null);
+    } else if (file) {
       setIsError(true);
-      setMessage("Please drop a valid PDF file.");
+      setMessage("Please upload a valid PDF file.");
     }
   };
-
-  const openFilePicker = () => fileInputRef.current?.click();
 
   const handleCompress = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -52,13 +45,15 @@ export default function CompressPDF() {
 
     setIsCompressing(true);
     setIsError(false);
-    setProgress(5); // Initial upload progress
-    setMessage("Uploading to queue...");
+    setProgress(5);
+    setStats(null);
+    setMessage("Uploading to secure queue...");
 
     const formData = new FormData();
     formData.append("pdf", selectedFile);
 
     try {
+      // 1. SEND TO QUEUE
       const response = await fetch(`${API_URL}/compress-pdf`, {
         method: "POST",
         body: formData,
@@ -69,6 +64,7 @@ export default function CompressPDF() {
       const { jobId } = await response.json();
       setMessage("In queue... Waiting for worker.");
 
+      // 2. START POLLING
       const pollInterval = setInterval(async () => {
         try {
           const statusRes = await fetch(`${API_URL}/status/${jobId}`);
@@ -85,17 +81,32 @@ export default function CompressPDF() {
             clearInterval(pollInterval);
             setProgress(100);
 
+            // Fetch metadata to calculate "The Win" (Savings Stats)
+            const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+            const fileCheck = await fetch(`${baseUrl}${data.downloadUrl}`);
+            const compSize = parseInt(fileCheck.headers.get("content-length") || "0");
+            const saving = (((selectedFile.size - compSize) / selectedFile.size) * 100).toFixed(0);
+            
+            setStats({
+              original: formatSize(selectedFile.size),
+              compressed: formatSize(compSize),
+              saving: saving
+            });
+
+            // Track success in PostHog
             if (typeof window !== 'undefined' && posthog) {
               posthog.capture("compression_success", {
                 file_type: "pdf",
                 original_name: selectedFile?.name,
-                file_size: selectedFile?.size
+                file_size: selectedFile?.size,
+                saving_percent: saving
               });
             }
 
-            setMessage("Compression complete! Starting download...");
-            
-            const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+            setMessage("Compression complete!");
+            setIsCompressing(false);
+
+            // 3. Trigger Download
             const anchor = document.createElement("a");
             anchor.href = `${baseUrl}${data.downloadUrl}`;
             anchor.download = `compressed-${selectedFile?.name || 'document.pdf'}`;
@@ -104,22 +115,22 @@ export default function CompressPDF() {
 
             setTimeout(() => {
               anchor.remove();
-              setIsCompressing(false);
             }, 1000);
 
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
+            const errorMsg = data.error || "The PDF engine failed to process this file.";
             setIsError(true);
-            setMessage(data.error || "The PDF engine encountered an error.");
+            setMessage(errorMsg);
             setIsCompressing(false);
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
           setIsError(true);
-          setMessage(pollErr.message);
+          setMessage("Lost connection to server.");
           setIsCompressing(false);
         }
-      }, 1500); // Polling slightly faster for smoother progress
+      }, 1500);
 
     } catch (error: any) {
       setIsError(true);
@@ -133,11 +144,17 @@ export default function CompressPDF() {
       <div className="text-content">
         <h1 className="page-headline">Professional Grade PDF Compression.</h1>
         <p className="page-description">
-          Reduce massive PDF payloads in seconds. Our engine ensures your documents shrink while maintaining pixel-perfect quality.
+          Reduce massive PDF payloads in seconds. Our Ghostscript-powered engine ensures your documents shrink while maintaining pixel-perfect quality.
         </p>
 
+        {/* NEW: Privacy Trust Badge */}
+        <div className="trust-badge">
+          <span className="shield-icon">🛡️</span>
+          <p>Files are processed via secure queue and auto-deleted after 30 minutes.</p>
+        </div>
+
         <ul className="features-list">
-          <li><span className="feature-icon">✨</span> Lossless Formatting preserved.</li>
+          <li><span className="feature-icon">✨</span> Lossless Formatting & Fonts preserved.</li>
           <li><span className="feature-icon">🔒</span> Managed via Secure Job Queue.</li>
           <li><span className="feature-icon">⚡</span> Real-time progress tracking.</li>
         </ul>
@@ -147,10 +164,10 @@ export default function CompressPDF() {
         <form onSubmit={handleCompress}>
           <div
             className={`file-input-wrap ${isDragging ? 'drag-active' : ''}`}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={openFilePicker}
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={(e) => { e.preventDefault(); setIsDragging(false); handleFileChange(e as any); }}
+            onClick={() => fileInputRef.current?.click()}
             style={{ cursor: 'pointer' }}
           >
             <div className="upload-icon">📄</div>
@@ -183,8 +200,20 @@ export default function CompressPDF() {
             </div>
           )}
 
+          {/* NEW: Success Stats "The Win" */}
+          {stats && (
+            <div className="stats-win">
+              <div className="stats-row">
+                <span>{stats.original}</span> 
+                <span>→</span> 
+                <span><strong>{stats.compressed}</strong></span>
+              </div>
+              <div className="stats-saving">{stats.saving}% Smaller! ✨</div>
+            </div>
+          )}
+
           <button type="submit" disabled={isCompressing || !selectedFile} className="btn-primary">
-            {isCompressing ? "Processing..." : selectedFile ? `Compress ${selectedFile.name}` : "Upload & Compress"}
+            {isCompressing ? "Shrinking PDF..." : selectedFile ? `Compress ${selectedFile.name}` : "Upload & Compress"}
           </button>
 
           {!isCompressing && message && (

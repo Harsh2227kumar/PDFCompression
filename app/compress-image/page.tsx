@@ -2,12 +2,13 @@
 import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
 import posthog from "posthog-js";
 
-// Matches your AWS API URL
+// Ensure this matches your AWS URL exactly
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export default function CompressImage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [progress, setProgress] = useState(0); // Progress state
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -17,6 +18,7 @@ export default function CompressImage() {
     setSelectedFile(event.target.files?.[0] ?? null);
     setMessage("");
     setIsError(false);
+    setProgress(0);
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -54,10 +56,10 @@ export default function CompressImage() {
 
     setIsCompressing(true);
     setIsError(false);
+    setProgress(5); // Initial upload start
     setMessage("Uploading to queue...");
 
     const formData = new FormData();
-    // Use "image" to match the updated server.js route
     formData.append("image", selectedFile);
 
     try {
@@ -80,44 +82,44 @@ export default function CompressImage() {
 
           const data = await statusRes.json();
 
+          // Update Progress from Backend
+          if (data.progress) setProgress(data.progress);
+
           if (data.state === "active") {
             setMessage("Optimizing... Applying mathematically optimal reduction.");
           } else if (data.state === "completed") {
-            // 1. Clear interval IMMEDIATELY to prevent double-downloads
             clearInterval(pollInterval);
+            setProgress(100);
 
-            // 2. Safely track event (Check if posthog exists to prevent crashes)
+            // Safely track event
             if (typeof window !== 'undefined' && posthog) {
               posthog.capture("compression_success", {
-                file_type: "pdf", // Ensure this is "image" on the image page!
+                file_type: "image", // Fixed for Image page
                 original_name: selectedFile?.name,
                 file_size: selectedFile?.size
               });
             }
 
             setMessage("Optimization complete! Your download is starting.");
-            setIsCompressing(false);
 
             // 3. Trigger Download
-            const anchor = document.createElement("a");
-            // Ensure there is no double slash if API_URL ends in /
             const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+            const anchor = document.createElement("a");
             anchor.href = `${baseUrl}${data.downloadUrl}`;
             anchor.download = `optimized-${selectedFile?.name || 'file'}`;
-
             document.body.appendChild(anchor);
             anchor.click();
 
-            // Cleanup anchor
             setTimeout(() => {
               anchor.remove();
-              // 4. Revoke the object URL if you were using blobs (optional but good for memory)
-            }, 100);
+              setIsCompressing(false);
+            }, 1000);
 
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
-            // Using a custom error message for the user
-            throw new Error(data.error || "Optimization failed in the queue. Please try a smaller file.");
+            setIsError(true);
+            setMessage(data.error || "Optimization failed in the queue.");
+            setIsCompressing(false);
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
@@ -125,7 +127,7 @@ export default function CompressImage() {
           setMessage(pollErr.message);
           setIsCompressing(false);
         }
-      }, 2000); // Check every 2 seconds
+      }, 1500); // Poll every 1.5s for smoother progress updates
 
     } catch (error: any) {
       setIsError(true);
@@ -136,7 +138,6 @@ export default function CompressImage() {
 
   return (
     <div className="split-layout">
-      {/* Left Column: Content */}
       <div className="text-content">
         <h1 className="page-headline">Intelligent Image Optimization.</h1>
         <p className="page-description">
@@ -150,16 +151,15 @@ export default function CompressImage() {
           </li>
           <li>
             <span className="feature-icon">🎨</span>
-            Preserves alpha channels and transparency perfectly.
+            Preserves transparency and alpha channels perfectly.
           </li>
           <li>
             <span className="feature-icon">🛡️</span>
-            Asynchronous queue processing for maximum reliability.
+            Real-time async processing with progress tracking.
           </li>
         </ul>
       </div>
 
-      {/* Right Column: Upload Panel */}
       <div className="glass-panel">
         <form onSubmit={handleCompress}>
           <div
@@ -175,8 +175,8 @@ export default function CompressImage() {
               {selectedFile
                 ? `Selected: ${selectedFile.name}`
                 : isDragging
-                  ? "Drop your Image here"
-                  : "Drag & drop your Image here, or click to browse"}
+                ? "Drop your Image here"
+                : "Drag & drop your Image here, or click to browse"}
             </p>
             <input
               ref={fileInputRef}
@@ -188,19 +188,35 @@ export default function CompressImage() {
             />
           </div>
 
+          {/* PROGRESS BAR UI */}
+          {isCompressing && (
+            <div className="progress-container">
+              <div className="progress-info">
+                <span className="progress-msg">{message}</span>
+                <span className="progress-percent">{progress}%</span>
+              </div>
+              <div className="progress-track">
+                <div 
+                  className="progress-fill" 
+                  style={{ width: `${progress}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={isCompressing || !selectedFile}
             className="btn-primary"
           >
             {isCompressing
-              ? "Processing in Queue..."
+              ? "Optimizing..."
               : selectedFile
-                ? `Optimize ${selectedFile.name}`
-                : "Upload & Compress"}
+              ? `Optimize ${selectedFile.name}`
+              : "Upload & Compress"}
           </button>
 
-          {message && (
+          {!isCompressing && message && (
             <div
               className={`msg-status ${isError ? "msg-error" : "msg-success"}`}
             >

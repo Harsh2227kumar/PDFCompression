@@ -4,6 +4,8 @@ import Navbar from "../components/Navbar";
 import ClientBackground from "../components/ClientBackground";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import { PHProvider } from "../components/PostHogProvider";
+import { Suspense } from "react";
 
 export const metadata: Metadata = {
   title: "File Compressor",
@@ -14,13 +16,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <div className="app-container">
-          <ClientBackground />
-          <Navbar />
-          <div className="content-wrap">{children}</div>
-        </div>
-        <Analytics />
-        <SpeedInsights />
+        <Suspense>
+          <PHProvider>
+            <div className="app-container">
+              <ClientBackground />
+              <Navbar />
+              <div className="content-wrap">{children}</div>
+            </div>
+            <Analytics />
+            <SpeedInsights />
+          </PHProvider>
+        </Suspense>
       </body>
     </html>
   );

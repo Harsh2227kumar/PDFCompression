@@ -1,5 +1,6 @@
 "use client";
 import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
+import posthog from "posthog-js";
 
 // Matches your AWS API URL
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -82,20 +83,41 @@ export default function CompressImage() {
           if (data.state === "active") {
             setMessage("Optimizing... Applying mathematically optimal reduction.");
           } else if (data.state === "completed") {
+            // 1. Clear interval IMMEDIATELY to prevent double-downloads
             clearInterval(pollInterval);
+
+            // 2. Safely track event (Check if posthog exists to prevent crashes)
+            if (typeof window !== 'undefined' && posthog) {
+              posthog.capture("compression_success", {
+                file_type: "pdf", // Ensure this is "image" on the image page!
+                original_name: selectedFile?.name,
+                file_size: selectedFile?.size
+              });
+            }
+
             setMessage("Optimization complete! Your download is starting.");
             setIsCompressing(false);
 
-            // 3. TRIGGER DOWNLOAD
+            // 3. Trigger Download
             const anchor = document.createElement("a");
-            anchor.href = `${API_URL}${data.downloadUrl}`;
-            anchor.download = `optimized-${selectedFile.name}`;
+            // Ensure there is no double slash if API_URL ends in /
+            const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+            anchor.href = `${baseUrl}${data.downloadUrl}`;
+            anchor.download = `optimized-${selectedFile?.name || 'file'}`;
+
             document.body.appendChild(anchor);
             anchor.click();
-            anchor.remove();
+
+            // Cleanup anchor
+            setTimeout(() => {
+              anchor.remove();
+              // 4. Revoke the object URL if you were using blobs (optional but good for memory)
+            }, 100);
+
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
-            throw new Error(data.error || "Image optimization failed in the queue.");
+            // Using a custom error message for the user
+            throw new Error(data.error || "Optimization failed in the queue. Please try a smaller file.");
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
@@ -153,8 +175,8 @@ export default function CompressImage() {
               {selectedFile
                 ? `Selected: ${selectedFile.name}`
                 : isDragging
-                ? "Drop your Image here"
-                : "Drag & drop your Image here, or click to browse"}
+                  ? "Drop your Image here"
+                  : "Drag & drop your Image here, or click to browse"}
             </p>
             <input
               ref={fileInputRef}
@@ -174,8 +196,8 @@ export default function CompressImage() {
             {isCompressing
               ? "Processing in Queue..."
               : selectedFile
-              ? `Optimize ${selectedFile.name}`
-              : "Upload & Compress"}
+                ? `Optimize ${selectedFile.name}`
+                : "Upload & Compress"}
           </button>
 
           {message && (

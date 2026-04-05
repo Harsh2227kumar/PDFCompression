@@ -4,66 +4,82 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const cors = require('cors');
-const { Queue, Worker, QueueEvents } = require('bullmq');
+const { Queue, Worker } = require('bullmq');
 const Redis = require('ioredis');
 const sharp = require('sharp');
+
+// --- SECURITY IMPORTS ---
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const { fileTypeFromFile } = require('file-type');
 
 const app = express();
 const port = 3001;
 
-// --- REDIS CONNECTION ---
-const redisConnection = new Redis({
-    maxRetriesPerRequest: null // Required for BullMQ
+// 1. SECURITY: Set HTTP headers for protection (XSS, Clickjacking, etc.)
+app.use(helmet());
+
+// 2. SECURITY: Rate Limiting (Protects your AWS CPU/RAM from spam)
+const apiLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour window
+    max: 15, // Limit each IP to 15 requests per hour
+    message: "Too many requests from this IP, please try again after an hour.",
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
-// --- BULLMQ QUEUE SETUP ---
-const compressionQueue = new Queue('compression-queue', { connection: redisConnection });
-
-// --- VERBOSE LOGGING HELPERS ---
-const log = (tag, msg) => {
-    console.log(`[${new Date().toISOString()}] [INFO] [${tag}] ${msg}`);
-};
-const logErr = (tag, msg, err = '') => {
-    console.error(`[${new Date().toISOString()}] [ERROR] [${tag}] ${msg}`, err);
-};
+// 3. SECURITY: Strict Payload Size Limits
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
 app.use(cors());
-app.use(express.json({ limit: '200mb' }));
-app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
-// Ensure directories exist
+// --- REDIS & QUEUE ---
+const redisConnection = new Redis({ maxRetriesPerRequest: null });
+const compressionQueue = new Queue('compression-queue', { connection: redisConnection });
+
+// --- LOGGING ---
+const log = (tag, msg) => console.log(`[${new Date().toISOString()}] [INFO] [${tag}] ${msg}`);
+const logErr = (tag, msg, err = '') => console.error(`[${new Date().toISOString()}] [ERROR] [${tag}] ${msg}`, err);
+
+// Directories
 const uploadDir = 'uploads/';
 const compressedDir = 'compressed/';
 [uploadDir, compressedDir].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
+// 4. SECURITY: Multer strict file limits
 const upload = multer({ 
     dest: uploadDir, 
-    limits: { fileSize: 200 * 1024 * 1024 } 
+    limits: { 
+        fileSize: 50 * 1024 * 1024, // 50MB Hard limit per file
+        files: 1 
+    } 
 });
 
-// --- UTILS ---
-function findGhostscriptCommand() {
-    const configuredCommand = process.env.GHOSTSCRIPT_PATH || process.env.GS_PATH;
-    if (configuredCommand) return configuredCommand;
-    if (process.platform === 'win32') return 'gswin64c';
-    return 'gs'; 
-}
-
-function commandExists(command, callback) {
-    const probe = process.platform === 'win32' ? 'where' : 'which';
-    execFile(probe, [command], (error) => {
-        callback(!error);
-    });
+// --- HELPER: MAGIC BYTE VALIDATION ---
+async function isRealFileType(filePath, expectedCategory) {
+    const type = await fileTypeFromFile(filePath);
+    if (!type) return false;
+    if (expectedCategory === 'pdf') return type.mime === 'application/pdf';
+    if (expectedCategory === 'image') return type.mime.startsWith('image/');
+    return false;
 }
 
 // --- API ROUTES ---
 
-// 1. PDF Queue Route
-app.post('/compress-pdf', upload.single('pdf'), async (req, res) => {
-    log('API', 'New PDF Compression Request Received');
+// PDF Route (with Rate Limiting)
+app.post('/compress-pdf', apiLimiter, upload.single('pdf'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
+
+    // 5. SECURITY: Verify file content (Magic Bytes)
+    const isValid = await isRealFileType(req.file.path, 'pdf');
+    if (!isValid) {
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        logErr('SECURITY', `Rejected spoofed PDF from ${req.ip}`);
+        return res.status(400).send('File content does not match PDF format.');
+    }
 
     try {
         const job = await compressionQueue.add('pdf-compression', {
@@ -72,19 +88,22 @@ app.post('/compress-pdf', upload.single('pdf'), async (req, res) => {
             originalName: req.file.originalname,
             filename: req.file.filename
         });
-        
-        log('QUEUE', `Job ${job.id} added for ${req.file.originalname}`);
         res.json({ jobId: job.id });
     } catch (err) {
-        logErr('QUEUE_ERROR', 'Failed to add PDF job', err);
-        res.status(500).send('Failed to queue compression task.');
+        res.status(500).send('Queue Error.');
     }
 });
 
-// 2. Image Queue Route
-app.post('/compress-image', upload.single('image'), async (req, res) => {
-    log('API', 'New Image Compression Request Received');
+// Image Route (with Rate Limiting)
+app.post('/compress-image', apiLimiter, upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
+
+    const isValid = await isRealFileType(req.file.path, 'image');
+    if (!isValid) {
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        logErr('SECURITY', `Rejected spoofed Image from ${req.ip}`);
+        return res.status(400).send('File content does not match Image format.');
+    }
 
     try {
         const job = await compressionQueue.add('image-compression', {
@@ -93,102 +112,79 @@ app.post('/compress-image', upload.single('image'), async (req, res) => {
             originalName: req.file.originalname,
             filename: req.file.filename
         });
-
-        log('QUEUE', `Job ${job.id} added for ${req.file.originalname}`);
         res.json({ jobId: job.id });
     } catch (err) {
-        logErr('QUEUE_ERROR', 'Failed to add Image job', err);
-        res.status(500).send('Failed to queue image task.');
+        res.status(500).send('Queue Error.');
     }
 });
 
-// 3. Status Polling Route
 app.get('/status/:jobId', async (req, res) => {
-    const { jobId } = req.params;
-    const job = await compressionQueue.getJob(jobId);
+    const job = await compressionQueue.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ state: 'not_found' });
 
-    if (!job) {
-        return res.status(404).json({ state: 'not_found', message: 'Job not found.' });
-    }
-
-    const state = await job.getState(); // waiting, active, completed, failed
+    const state = await job.getState();
     const result = job.returnvalue;
-
     res.json({
         state,
-        progress: job.progress,
         downloadUrl: result ? `/download/${result.compressedFilename}` : null,
         error: job.failedReason
     });
 });
 
-// 4. Final Download Route
 app.get('/download/:filename', (req, res) => {
-    const filePath = path.join(__dirname, 'compressed', req.params.filename);
+    // 6. SECURITY: Prevent Directory Traversal using path.basename
+    const safeFilename = path.basename(req.params.filename);
+    const filePath = path.join(__dirname, 'compressed', safeFilename);
     
     if (fs.existsSync(filePath)) {
         res.download(filePath, (err) => {
-            if (!err) {
-                // Optional: Delete file after download to keep server clean
-                // fs.unlinkSync(filePath); 
+            if (!err && fs.existsSync(filePath)) {
+                // Delete file immediately after download
+                fs.unlinkSync(filePath); 
             }
         });
     } else {
-        res.status(404).send('File expired or not found.');
+        res.status(404).send('File not found or expired.');
     }
 });
 
-// --- THE BACKGROUND WORKER ---
-// This processes one job at a time (concurrency: 1)
+// --- WORKER LOGIC ---
 const worker = new Worker('compression-queue', async (job) => {
     const { type, inputPath, originalName, filename } = job.data;
-    log('WORKER', `Starting Job ${job.id} (${type}): ${originalName}`);
+    const outputFilename = `compressed-${filename}${type === 'pdf' ? '.pdf' : path.extname(originalName)}`;
+    const outputPath = path.join(compressedDir, outputFilename);
 
     if (type === 'pdf') {
         return new Promise((resolve, reject) => {
-            const outputPath = `compressed/compressed-${filename}.pdf`;
-            const gsCmd = findGhostscriptCommand();
-
-            const args = [
+            // 7. SECURITY: Ghostscript -dSAFER flag
+            const gsProcess = spawn('gs', [
                 '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=pdfwrite',
-                '-dCompatibilityLevel=1.4', '-dPDFSETTINGS=/printer',
-                `-sOutputFile=${outputPath}`, inputPath
-            ];
-
-            const gsProcess = spawn(gsCmd, args);
+                '-dPDFSETTINGS=/printer', `-sOutputFile=${outputPath}`, inputPath
+            ]);
             gsProcess.on('close', (code) => {
                 if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-                if (code === 0) {
-                    resolve({ compressedFilename: `compressed-${filename}.pdf` });
-                } else {
-                    reject(new Error(`Ghostscript exited with code ${code}`));
-                }
+                if (code === 0) resolve({ compressedFilename: outputFilename });
+                else reject(new Error('Ghostscript Failed'));
             });
         });
     } else {
-        const ext = path.extname(originalName).toLowerCase() || '.jpg';
-        const outputPath = `compressed/compressed-${filename}${ext}`;
-        
-        let transform = sharp(inputPath);
-        if (ext === '.png') transform = transform.png({ compressionLevel: 9, palette: true });
-        else if (ext === '.webp') transform = transform.webp({ quality: 85, nearLossless: true });
-        else transform = transform.jpeg({ quality: 82, mozjpeg: true });
-
-        await transform.toFile(outputPath);
+        await sharp(inputPath).jpeg({ quality: 80, mozjpeg: true }).toFile(outputPath);
         if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-        return { compressedFilename: `compressed-${filename}${ext}` };
+        return { compressedFilename: outputFilename };
     }
-}, { 
-    connection: redisConnection,
-    concurrency: 1 // Only process 1 file at a time to prevent CPU overload
-});
+}, { connection: redisConnection, concurrency: 1 });
 
-worker.on('completed', (job) => log('WORKER', `Job ${job.id} completed successfully.`));
-worker.on('failed', (job, err) => logErr('WORKER', `Job ${job.id} failed`, err));
+// 8. SECURITY: Auto-Cleanup (Deletes files older than 30 mins from compressed folder)
+setInterval(() => {
+    const now = Date.now();
+    fs.readdirSync(compressedDir).forEach(file => {
+        const filePath = path.join(compressedDir, file);
+        const stats = fs.statSync(filePath);
+        if (now - stats.mtimeMs > 30 * 60 * 1000) {
+            fs.unlinkSync(filePath);
+            log('CLEANUP', `Deleted expired file: ${file}`);
+        }
+    });
+}, 10 * 60 * 1000); // Runs every 10 minutes
 
-const server = app.listen(port, () => {
-    log('SERVER', `Queue-based API listening at http://localhost:${port}`);
-});
-
-server.keepAliveTimeout = 15 * 60 * 1000;
-server.headersTimeout = (15 * 60 * 1000) + 1000;
+app.listen(port, () => log('SERVER', `Hardened API running on port ${port}`));

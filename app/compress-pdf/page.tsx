@@ -1,6 +1,7 @@
 "use client";
-import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
+import { ChangeEvent, FormEvent, useRef, useState, DragEvent, useEffect } from "react";
 
+// Ensure this matches your AWS URL exactly (e.g., http://13.xxx.xxx.xxx)
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export default function CompressPDF() {
@@ -54,12 +55,13 @@ export default function CompressPDF() {
 
     setIsCompressing(true);
     setIsError(false);
-    setMessage("Processing payload... This may take a moment for large files.");
+    setMessage("Uploading to queue...");
 
     const formData = new FormData();
     formData.append("pdf", selectedFile);
 
     try {
+      // 1. SEND TO QUEUE
       const response = await fetch(`${API_URL}/compress-pdf`, {
         method: "POST",
         body: formData,
@@ -67,51 +69,65 @@ export default function CompressPDF() {
 
       if (!response.ok) throw new Error(await response.text());
 
-      const blob = await response.blob();
-      const downloadUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = downloadUrl;
-      anchor.download = `compressed-${selectedFile.name}`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(downloadUrl);
+      const { jobId } = await response.json();
+      setMessage("In queue... Waiting for worker.");
 
-      setMessage("Compression complete. Download starting.");
+      // 2. START POLLING
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${API_URL}/status/${jobId}`);
+          if (!statusRes.ok) return;
+
+          const data = await statusRes.json();
+          
+          if (data.state === "active") {
+            setMessage("Processing... Our engine is shrinking your PDF.");
+          } else if (data.state === "completed") {
+            clearInterval(pollInterval);
+            setMessage("Compression complete! Starting download...");
+            setIsCompressing(false);
+
+            // 3. TRIGGER DOWNLOAD
+            const anchor = document.createElement("a");
+            anchor.href = `${API_URL}${data.downloadUrl}`;
+            anchor.download = `compressed-${selectedFile.name}`;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+          } else if (data.state === "failed") {
+            clearInterval(pollInterval);
+            throw new Error(data.error || "Queue processing failed.");
+          }
+        } catch (pollErr: any) {
+          clearInterval(pollInterval);
+          setIsError(true);
+          setMessage(pollErr.message);
+          setIsCompressing(false);
+        }
+      }, 2000); // Poll every 2 seconds
+
     } catch (error: any) {
       setIsError(true);
       setMessage(error.message || "Failed to connect to API.");
-    } finally {
       setIsCompressing(false);
     }
   };
 
   return (
     <div className="split-layout">
-      {/* Left Column: Content */}
       <div className="text-content">
         <h1 className="page-headline">Professional Grade PDF Compression.</h1>
         <p className="page-description">
-          Reduce massive PDF payloads in seconds. Our Ghostscript-powered engine ensures your documents shrink in size while maintaining pixel-perfect quality.
+          Reduce massive PDF payloads in seconds. Our Ghostscript-powered engine ensures your documents shrink while maintaining pixel-perfect quality.
         </p>
         
         <ul className="features-list">
-          <li>
-            <span className="feature-icon">✨</span>
-            Lossless Formatting & Embedded Fonts preserved.
-          </li>
-          <li>
-            <span className="feature-icon">🔒</span>
-            Files are processed entirely in memory and auto-deleted.
-          </li>
-          <li>
-            <span className="feature-icon">⚡</span>
-            Handles heavy documents up to 60MB smoothly.
-          </li>
+          <li><span className="feature-icon">✨</span> Lossless Formatting & Fonts preserved.</li>
+          <li><span className="feature-icon">🔒</span> Managed via Job Queue for reliability.</li>
+          <li><span className="feature-icon">⚡</span> Handles high traffic without server crashes.</li>
         </ul>
       </div>
 
-      {/* Right Column: Upload Panel */}
       <div className="glass-panel">
         <form onSubmit={handleCompress}>
           <div 
@@ -120,33 +136,24 @@ export default function CompressPDF() {
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             onClick={openFilePicker}
+            style={{ cursor: 'pointer' }}
           >
-            <div
-              className="upload-icon"
-              aria-label="Select PDF file"
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openFilePicker();
-                }
-              }}
-            />
+            <div className="upload-icon">📄</div>
             <p className="upload-prompt">
-              {isDragging ? "Drop your PDF here" : "Drag & drop your PDF here, or click to browse"}
+              {selectedFile ? `Selected: ${selectedFile.name}` : isDragging ? "Drop your PDF here" : "Drag & drop your PDF here, or click to browse"}
             </p>
             <input 
               ref={fileInputRef}
               type="file" 
               accept="application/pdf,.pdf" 
               onChange={handleFileChange} 
-              className="file-input file-input-hidden"
+              className="file-input"
+              style={{ display: 'none' }}
             />
           </div>
 
           <button type="submit" disabled={isCompressing || !selectedFile} className="btn-primary">
-            {isCompressing ? "Compressing..." : selectedFile ? `Compress ${selectedFile.name}` : "Upload & Compress"}
+            {isCompressing ? "Processing in Queue..." : selectedFile ? `Compress ${selectedFile.name}` : "Upload & Compress"}
           </button>
 
           {message && (

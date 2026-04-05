@@ -2,7 +2,7 @@
 import { ChangeEvent, FormEvent, useRef, useState, DragEvent } from "react";
 import posthog from "posthog-js";
 
-// Ensure this matches your AWS URL exactly
+// Ensure this matches your AWS URL exactly (e.g., http://13.xxx.xxx.xxx:3001)
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export default function CompressPDF() {
@@ -12,11 +12,13 @@ export default function CompressPDF() {
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  // NEW: State for Comparison Stats
+  
+  // State for the "The Win" comparison stats
   const [stats, setStats] = useState<{ original: string, compressed: string, saving: string } | null>(null);
+  
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Helper to format bytes
+  // Helper to format bytes into readable MB
   const formatSize = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2) + " MB";
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement> | DragEvent<HTMLDivElement>) => {
@@ -45,15 +47,15 @@ export default function CompressPDF() {
 
     setIsCompressing(true);
     setIsError(false);
-    setProgress(5);
     setStats(null);
+    setProgress(5);
     setMessage("Uploading to secure queue...");
 
     const formData = new FormData();
     formData.append("pdf", selectedFile);
 
     try {
-      // 1. SEND TO QUEUE
+      // 1. SUBMIT JOB TO BULLMQ QUEUE
       const response = await fetch(`${API_URL}/compress-pdf`, {
         method: "POST",
         body: formData,
@@ -64,7 +66,7 @@ export default function CompressPDF() {
       const { jobId } = await response.json();
       setMessage("In queue... Waiting for worker.");
 
-      // 2. START POLLING
+      // 2. POLL FOR STATUS
       const pollInterval = setInterval(async () => {
         try {
           const statusRes = await fetch(`${API_URL}/status/${jobId}`);
@@ -72,29 +74,36 @@ export default function CompressPDF() {
 
           const data = await statusRes.json();
 
-          // Update Progress from Backend
+          // Sync numeric progress from worker
           if (data.progress) setProgress(data.progress);
 
           if (data.state === "active") {
             setMessage("Processing... Our engine is shrinking your PDF.");
           } else if (data.state === "completed") {
+            // STOP POLLING
             clearInterval(pollInterval);
             setProgress(100);
 
-            // Fetch metadata to calculate "The Win" (Savings Stats)
+            // FIX UI GLITCH: Clear loading state and messages immediately
+            setMessage(""); 
+            setIsCompressing(false);
+
             const baseUrl = API_URL.endsWith('/') ? API_URL.slice(0, -1) : API_URL;
+            
+            // Fetch headers to calculate "The Win" accurately
             const fileCheck = await fetch(`${baseUrl}${data.downloadUrl}`);
             const compSize = parseInt(fileCheck.headers.get("content-length") || "0");
             const saving = (((selectedFile.size - compSize) / selectedFile.size) * 100).toFixed(0);
             
+            // Set Comparison Stats
             setStats({
               original: formatSize(selectedFile.size),
               compressed: formatSize(compSize),
               saving: saving
             });
 
-            // Track success in PostHog
-            if (typeof window !== 'undefined' && posthog) {
+            // Track Success in PostHog
+            if (typeof window !== 'undefined' && posthog && posthog.capture) {
               posthog.capture("compression_success", {
                 file_type: "pdf",
                 original_name: selectedFile?.name,
@@ -103,19 +112,13 @@ export default function CompressPDF() {
               });
             }
 
-            setMessage("Compression complete!");
-            setIsCompressing(false);
-
-            // 3. Trigger Download
+            // 3. TRIGGER AUTO-DOWNLOAD
             const anchor = document.createElement("a");
             anchor.href = `${baseUrl}${data.downloadUrl}`;
             anchor.download = `compressed-${selectedFile?.name || 'document.pdf'}`;
             document.body.appendChild(anchor);
             anchor.click();
-
-            setTimeout(() => {
-              anchor.remove();
-            }, 1000);
+            anchor.remove();
 
           } else if (data.state === "failed") {
             clearInterval(pollInterval);
@@ -141,13 +144,14 @@ export default function CompressPDF() {
 
   return (
     <div className="split-layout">
+      {/* Left Column: Headline and Trust Elements */}
       <div className="text-content">
         <h1 className="page-headline">Professional Grade PDF Compression.</h1>
         <p className="page-description">
           Reduce massive PDF payloads in seconds. Our Ghostscript-powered engine ensures your documents shrink while maintaining pixel-perfect quality.
         </p>
 
-        {/* NEW: Privacy Trust Badge */}
+        {/* TRUST BADGE */}
         <div className="trust-badge">
           <span className="shield-icon">🛡️</span>
           <p>Files are processed via secure queue and auto-deleted after 30 minutes.</p>
@@ -160,6 +164,7 @@ export default function CompressPDF() {
         </ul>
       </div>
 
+      {/* Right Column: Interaction Panel */}
       <div className="glass-panel">
         <form onSubmit={handleCompress}>
           <div
@@ -200,7 +205,7 @@ export default function CompressPDF() {
             </div>
           )}
 
-          {/* NEW: Success Stats "The Win" */}
+          {/* SUCCESS STATS "THE WIN" */}
           {stats && (
             <div className="stats-win">
               <div className="stats-row">

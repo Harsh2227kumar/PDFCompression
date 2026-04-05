@@ -275,3 +275,12 @@ setInterval(
 );
 
 app.listen(port, () => log("SERVER", `Production API running on port ${port}`));
+
+
+const server = app.listen(port, () => {
+    log('SERVER', `Production API running on port ${port}`);
+});
+
+// ADD THESE TWO LINES:
+server.keepAliveTimeout = 120000; // 120 seconds
+server.headersTimeout = 125000;   // 125 seconds

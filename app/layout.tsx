@@ -3,6 +3,7 @@ import "./globals.css";
 import Navbar from "../components/Navbar";
 import ClientBackground from "../components/ClientBackground";
 import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 
 export const metadata: Metadata = {
   title: "File Compressor",
@@ -19,6 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="content-wrap">{children}</div>
         </div>
         <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
